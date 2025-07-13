@@ -3,6 +3,7 @@
 #include "bmpHeader.h"
 
 int readBmp(char *filename, unsigned char **data, int *cols, int *rows, int *color)
+
 {
 	BITMAPFILEHEADER bmpHeader;
 	BITMAPINFOHEADER bmpInfoHeader;
