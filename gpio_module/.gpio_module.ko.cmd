@@ -1,0 +1,1 @@
+savedcmd_/home/pi/home/gpio_module/gpio_module.ko := aarch64-linux-gnu-ld -r -EL  -maarch64elf -z noexecstack --build-id=sha1  -T scripts/module.lds -o /home/pi/home/gpio_module/gpio_module.ko /home/pi/home/gpio_module/gpio_module.o /home/pi/home/gpio_module/gpio_module.mod.o /home/pi/home/gpio_module/.module-common.o
