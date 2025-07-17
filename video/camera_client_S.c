@@ -36,7 +36,8 @@ int main(int argc, char **argv) {
     // 서버 주소 설정
     memset(&servaddr, 0, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");  // 서버 IP 주소
+    //servaddr.sin_addr.s_addr = inet_addr("127.0.0.1");  // 서버 IP 주소
+    servaddr.sin_addr.s_addr = inet_addr("192.168.137.2");
     servaddr.sin_port = htons(TCP_PORT);
     
     // 서버에 연결
