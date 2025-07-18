@@ -4,6 +4,13 @@
 #include <linux/io.h> 			/* ioremap( ), iounmap( ) 커널 함수 */
 #include <linux/uaccess.h> 		/* copy_to_user( ), copy_from_user( ) 커널 함수 */
 #include <linux/gpio.h>			/* GPIO 함수 */
+#include <linux/interrupt.h>
+
+#include <linux/timer.h>
+#include <linux/mutex.h>
+#include <linux/string.h>
+#include <linux/sched.h>
+#include <linux/sched/signal.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("GangHee");
@@ -32,6 +39,7 @@ MODULE_DESCRIPTION("Raspberry Pi GPIO LED Device Module");
 #define GPIO_DEVICE "gpioled" 		/* 디바이스 디바이스 파일의 이름 */
 
 #define GPIO_LED  530   //18 			/* LED 사용을 위한 GPIO의 번호 */
+#define GPIO_SW 536 //24
                         
 static char msg[BLOCK_SIZE] = {0}; 	/* write( ) 함수에서 읽은 데이터 저장 */
 
@@ -51,6 +59,44 @@ static struct file_operations gpio_fops = {
 };
 
 struct cdev gpio_cdev;
+static int switch_irq;
+static struct timer_list timer;
+static struct task_struct *task;
+static DEFINE_MUTEX(led_mutex);
+
+static void timer_func(struct timer_list *t)
+{
+    if(mutex_trylock(&led_mutex) != 0){
+        static int ledflag = 1;
+        gpio_set_value(GPIO_LED, ledflag);
+        ledflag = !ledflag;
+        mutex_unlock(&led_mutex);
+    }
+    mod_timer(&timer, jiffies + (1*HZ));
+}
+
+
+static irqreturn_t isr_func(int irq, void *data)
+{
+    printk("qwe");
+    if (mutex_trylock(&led_mutex) != 0){
+        if(irq == switch_irq && !gpio_get_value(GPIO_LED)){
+            gpio_set_value(GPIO_LED, 1);
+        }else if(irq == switch_irq && gpio_get_value(GPIO_LED)){
+            
+            static struct  kernel_siginfo sinfo;
+            memset(&sinfo, 0, sizeof(struct kernel_siginfo));
+            sinfo.si_signo = SIGIO;
+            sinfo.si_code = SI_USER;
+            send_sig_info(SIGIO, &sinfo, task);
+
+            gpio_set_value(GPIO_LED, 0);
+        }
+        mutex_unlock(&led_mutex);
+    }
+
+    return IRQ_HANDLED;   
+}
 
 int init_module(void)
 {
@@ -59,7 +105,8 @@ int init_module(void)
     int err;
 
     printk(KERN_INFO "Hello module!\n");
-    try_module_get(THIS_MODULE);
+
+    mutex_init(&led_mutex);
 
     /* 문자 디바이스를 등록한다. */
     devno = MKDEV(GPIO_MAJOR, GPIO_MINOR);
@@ -82,22 +129,28 @@ int init_module(void)
     /* GPIO 사용을 요청한다. */
     gpio_request(GPIO_LED, "LED");
     gpio_direction_output(GPIO_LED, 0);
-
+    gpio_request(GPIO_SW, "SWITCH");
+    switch_irq = gpio_to_irq(GPIO_SW);
+    err = request_irq(switch_irq, isr_func, IRQF_TRIGGER_RISING, "switch", NULL);
+   
     return 0;
 }
 
 void cleanup_module(void)
 {
     dev_t devno = MKDEV(GPIO_MAJOR, GPIO_MINOR);
-    unregister_chrdev_region(devno, 1); 		/* 문자 디바이스의 등록을 해제한다. */
 
+    mutex_destroy(&led_mutex);
+
+    unregister_chrdev_region(devno, 1); 		/* 문자 디바이스의 등록을 해제한다. */
     cdev_del(&gpio_cdev); 				/* 문자 디바이스의 구조체를 해제한다. */
+
+    free_irq(switch_irq, NULL);
 
     /* 더 이상 사용이 필요 없는 경우 관련 자원을 해제한다. */
     gpio_free(GPIO_LED);
+    gpio_free(GPIO_SW);
     //gpio_direction_output(GPIO_LED, 0);
-
-    module_put(THIS_MODULE);
 
     printk(KERN_INFO "Good-bye module!\n");
 }
@@ -105,14 +158,14 @@ void cleanup_module(void)
 static int gpio_open(struct inode *inod, struct file *fil)
 {
     printk("GPIO Device opened(%d/%d)\n", imajor(inod), iminor(inod));
-
+    try_module_get(THIS_MODULE);
     return 0;
 }
 
 static int gpio_close(struct inode *inod, struct file *fil)
 {
     printk("GPIO Device closed(%d)\n", MAJOR(fil->f_path.dentry->d_inode->i_rdev));
-
+    module_put(THIS_MODULE);
     return 0;
 }
 
@@ -121,7 +174,6 @@ static ssize_t gpio_read(struct file *inode, char *buff, size_t len, loff_t *off
     int count;
 
     strcat(msg, " from Kernel");
-
     count = copy_to_user(buff, msg, strlen(msg)+1); /* 사용자 영역으로 데이터를 보낸다. */
 
     printk("GPIO Device(%d) read : %s(%d)\n",
@@ -133,15 +185,40 @@ static ssize_t gpio_read(struct file *inode, char *buff, size_t len, loff_t *off
 static ssize_t gpio_write(struct file *inode, const char *buff, size_t len, loff_t *off)
 {
     short count;
+    char *cmd, *str;
+    char *sep = ":";
+    char *endptr, *pidstr;
+    pid_t pid;
 
     memset(msg, 0, BLOCK_SIZE);
     count = copy_from_user(msg, buff, len); /* 사용자 영역으로부터 데이터를 가져온다. */
 
-    /* LED를 설정한다. */
-    gpio_set_value(GPIO_LED, (!strcmp(msg, "0"))?0:1);
+    str = kstrdup(msg, GFP_KERNEL);
+    cmd = strsep(&str, sep);
+    pidstr = strsep(&str, sep);
+    printk("Command : %s, pid : %s\n", cmd, pidstr);
+    cmd[1] = '\0';
+    
+    if(!strcmp(msg, "0")){
+        del_timer_sync(&timer);
+        gpio_set_value(GPIO_LED, (!strcmp(msg, "0"))?0:1);
+    }else{
+        timer_setup(&timer, timer_func, 0);
 
-    printk("GPIO Device(%d) write : %s(%ld)\n",
-            MAJOR(inode->f_path.dentry->d_inode->i_rdev), msg, len);
+        timer.expires = jiffies + (1*HZ);
+        add_timer(&timer);
+    }
+    
+    printk("GPIO Device(%d) write : %s(%ld)\n", MAJOR(inode->f_path.dentry->d_inode->i_rdev), msg, len);
 
+    pid = simple_strtol(pidstr, &endptr, 10);
+    if(endptr != NULL){
+        task = pid_task(find_vpid(pid), PIDTYPE_PID);
+        if(task == NULL){
+            printk("Error : Can't find PID from user application\n");
+            return 0;
+        }
+    }
+    
     return count;
 }
